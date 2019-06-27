@@ -5,6 +5,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import org.apache.poi.hpsf.ClassID;
 import org.apache.poi.poifs.filesystem.DirectoryEntry;
@@ -76,8 +77,8 @@ public class OLE2Bleach implements Bleach {
     // Returns false if the entry should be removed
     Predicate<Entry> visitor =
         ((Predicate<Entry>) (e -> true))
-            .and(new MacroRemover(session))
             .and(new ObjectRemover(session))
+            .and(new MacroRemover(session))
             .and(new SummaryInformationSanitiser(session));
 
     LOGGER.debug("Root ClassID: {}", rootIn.getStorageClsid());
@@ -89,6 +90,7 @@ public class OLE2Bleach implements Bleach {
         .forEachRemaining(
             entry -> {
               if (!visitor.test(entry)) {
+                LOGGER.debug("Removing entry {}", entry.getName());
                 return;
               }
               copyNodesRecursively(session, entry, rootOut);
@@ -103,20 +105,15 @@ public class OLE2Bleach implements Bleach {
     try {
       if (!entry.isDirectoryEntry()) {
         DocumentEntry dentry = (DocumentEntry) entry;
-        DocumentInputStream dstream = new DocumentInputStream(dentry);
-        ByteArrayOutputStream os = new ByteArrayOutputStream();
+        try (DocumentInputStream dstream = new DocumentInputStream(dentry);
+          ByteArrayOutputStream os = new ByteArrayOutputStream()) {
 
-        try {
           session.sanitize(dstream, os);
-        } catch (BleachException e) {
-          LOGGER.error("An error occured", e);
-          return;
+
+          ByteArrayInputStream bais = new ByteArrayInputStream(os.toByteArray());
+
+          target.createDocument(dentry.getName(), bais);
         }
-
-        ByteArrayInputStream bais = new ByteArrayInputStream(os.toByteArray());
-
-        target.createDocument(dentry.getName(), bais);
-        dstream.close();
         return;
       }
 
@@ -125,7 +122,7 @@ public class OLE2Bleach implements Bleach {
       newTarget.setStorageClsid(dirEntry.getStorageClsid());
 
       sanitize(session, dirEntry, newTarget);
-    } catch (IOException e) {
+    } catch (IOException | BleachException e) {
       LOGGER.error("An error occured while trying to recursively copy nodes", e);
     }
   }

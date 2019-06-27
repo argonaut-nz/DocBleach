@@ -1,6 +1,5 @@
 package xyz.docbleach.api.bleach;
 
-import java.io.BufferedInputStream;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -9,8 +8,10 @@ import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import xyz.docbleach.api.BleachSession;
 import xyz.docbleach.api.exception.BleachException;
 import xyz.docbleach.api.util.CloseShieldInputStream;
@@ -56,7 +57,7 @@ public class CompositeBleach implements Bleach {
       if (os != null && is == null) {
         // We check if "is" is null to prevent useless object creation
         ByteArrayInputStream bais = new ByteArrayInputStream(os.toByteArray());
-        is = new CloseShieldInputStream(new BufferedInputStream(bais, bais.available()));
+        is = new CloseShieldInputStream(bais);
 
         try {
           os.close();

@@ -1,5 +1,7 @@
 package xyz.docbleach.module.ooxml;
 
+import static org.apache.poi.ooxml.POIXMLTypeLoader.DEFAULT_XML_OPTIONS;
+
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -8,19 +10,33 @@ import java.io.OutputStream;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.Map;
+import java.util.Objects;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.StreamSupport;
+
 import org.apache.poi.UnsupportedFileFormatException;
+import org.apache.poi.ooxml.POIXMLProperties;
+import org.apache.poi.ooxml.POIXMLTypeLoader;
 import org.apache.poi.openxml4j.exceptions.InvalidFormatException;
+import org.apache.poi.openxml4j.exceptions.OpenXML4JException;
 import org.apache.poi.openxml4j.opc.OPCPackage;
 import org.apache.poi.openxml4j.opc.PackagePart;
 import org.apache.poi.openxml4j.opc.PackagePartName;
 import org.apache.poi.openxml4j.opc.PackageRelationship;
+import org.apache.poi.openxml4j.opc.PackageRelationshipCollection;
 import org.apache.poi.openxml4j.opc.PackagingURIHelper;
 import org.apache.poi.openxml4j.opc.RelationshipSource;
 import org.apache.poi.openxml4j.opc.TargetMode;
 import org.apache.poi.openxml4j.opc.internal.ContentType;
 import org.apache.poi.poifs.filesystem.FileMagic;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.xmlbeans.XmlException;
+import org.openxmlformats.schemas.officeDocument.x2006.extendedProperties.CTProperties;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.CTSettings;
+import org.openxmlformats.schemas.wordprocessingml.x2006.main.SettingsDocument;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import xyz.docbleach.api.BleachSession;
 import xyz.docbleach.api.bleach.Bleach;
 import xyz.docbleach.api.exception.BleachException;
@@ -191,12 +207,14 @@ public class OOXMLBleach implements Bleach {
   }
 
   public void sanitize(OPCPackage pkg, BleachSession session)
-      throws BleachException, InvalidFormatException {
+      throws BleachException, InvalidFormatException, IOException {
     LOGGER.trace("File opened");
     Iterator<PackagePart> it = getPartsIterator(pkg);
 
     pkg.ensureRelationships();
 
+    sanitizeExternalTemplate(session, pkg);
+    
     sanitize(session, pkg, pkg.getRelationships());
 
     PackagePart part;
@@ -224,6 +242,79 @@ public class OOXMLBleach implements Bleach {
     }
   }
 
+  private void sanitizeExternalTemplate(BleachSession session, OPCPackage pkg) throws IOException {
+      
+      pkg.getPartsByContentType("application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml")
+              .stream()
+              .map(this::getRelationshipCollection)
+              .filter(rc -> !Objects.isNull(rc))
+              .flatMap(rc -> StreamSupport.stream(rc.spliterator(), false))
+              .filter(r -> r.getTargetMode() == TargetMode.EXTERNAL)
+              .filter(r -> r.getRelationshipType().equals("http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate"))
+              .forEach(r -> {
+                    PackagePart part = r.getSource();
+                    part.removeRelationship(r.getId());
+
+                    r.getPackage()
+                        .getPartsByContentType("application/vnd.openxmlformats-officedocument.extended-properties+xml")
+                        .stream()
+                        .filter(p -> p.getPartName().getName().equals("/docProps/app.xml"))
+                        .forEach(p -> {
+                            try {
+                                POIXMLProperties props = new POIXMLProperties(p.getPackage());
+
+                                CTProperties underlyingProps = props.getExtendedProperties().getUnderlyingProperties();
+                                underlyingProps.setTemplate("Normal.dotm");
+                                props.commit();
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                            }
+                        });
+
+                    r.getPackage()
+                        .getPartsByContentType("application/vnd.openxmlformats-officedocument.wordprocessingml.settings+xml")
+                        .stream()
+                        .filter(p -> p.getPartName().getName().equals("/word/settings.xml"))
+                        .forEach(extendedPropertiesPart -> {
+                            try {
+                                SettingsDocument factory = SettingsDocument.Factory.parse(extendedPropertiesPart.getInputStream(), DEFAULT_XML_OPTIONS);
+                                CTSettings settings = factory.getSettings();
+                                settings.unsetAttachedTemplate();
+                                try (OutputStream out = extendedPropertiesPart.getOutputStream()) {
+                                    factory.save(out, DEFAULT_XML_OPTIONS);
+                                }
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                            }
+                        });
+                    
+                    LOGGER.debug(
+                            "Removed EXTERNAL template reference from part {} pointing to {}.",
+                            part.getPartName(),
+                            r.getTargetURI());
+
+                    Threat threat = Threat.builder()
+                        .type(ThreatType.EXTERNAL_CONTENT)
+                        .severity(ThreatSeverity.MEDIUM)
+                        .action(ThreatAction.REMOVE)
+                        .location(part.getPartName().getName())
+                        .details("External template: " + r.getSourceURI())
+                        .build();
+
+                    session.recordThreat(threat);
+                });
+          
+  }
+
+  private PackageRelationshipCollection getRelationshipCollection(PackagePart p) {
+      try {
+          return p.getRelationshipsByType("http://schemas.openxmlformats.org/officeDocument/2006/relationships/attachedTemplate");
+      } catch (InvalidFormatException e) {
+          e.printStackTrace();
+          return null;
+      }
+  }
+  
   /**
    * The dummy file tries to prevent Microsoft Office from crashing because they forgot a lot of "!=
    * null" while checking if a resource is valid.
@@ -351,10 +442,11 @@ public class OOXMLBleach implements Bleach {
    */
   private void replaceRelationship(RelationshipSource pkg, PackageRelationship relationship) {
     String rId = relationship.getId();
+    String type = relationship.getRelationshipType();
 
     pkg.removeRelationship(rId);
     pkg.addRelationship(
-        DUMMY_PACKAGE_PART_NAME, TargetMode.INTERNAL, Relations.OPENXML_OLE_OBJECT, rId);
+        DUMMY_PACKAGE_PART_NAME, TargetMode.INTERNAL, type, rId);
   }
 
   private boolean isBlacklistedRelationType(String relationshipType) {

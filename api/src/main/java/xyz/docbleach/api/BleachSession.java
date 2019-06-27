@@ -1,16 +1,20 @@
 package xyz.docbleach.api;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Collection;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+
 import xyz.docbleach.api.bleach.Bleach;
 import xyz.docbleach.api.exception.BleachException;
 import xyz.docbleach.api.exception.RecursionBleachException;
 import xyz.docbleach.api.threat.Threat;
+import xyz.docbleach.api.util.StreamUtils;
 
 /**
  * A Bleach Session handles the data a bleach needs to store: list of the threats removed, for
@@ -63,12 +67,15 @@ public class BleachSession implements Serializable {
   public void sanitize(InputStream is, OutputStream os) throws BleachException {
     try {
       if (ongoingTasks++ >= MAX_ONGOING_TASKS) {
-        throw new RecursionBleachException(ongoingTasks);
+          throw new RecursionBleachException(ongoingTasks);
       }
       if (!bleach.handlesMagic(is)) {
-        return;
+          StreamUtils.copy(is, os);
+          return;
       }
       bleach.sanitize(is, os, this);
+    } catch (IOException e) {
+      throw new BleachException(e);
     } finally {
       ongoingTasks--;
     }
